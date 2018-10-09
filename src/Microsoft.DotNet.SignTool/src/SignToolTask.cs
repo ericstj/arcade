@@ -33,6 +33,13 @@ namespace Microsoft.DotNet.SignTool
         public bool TestSign { get; set; }
 
         /// <summary>
+        /// When set to true will require that all discovered file names have a Signing Information
+        /// set on `FileSignInfo`. If a discovered file name isn't present on `FileSignInfo` an
+        /// error will be logged and execution aborted.
+        /// </summary>
+        public bool StrictSigningInfo { get; set; }
+
+        /// <summary>
         /// Working directory used for storing files created during signing.
         /// </summary>
         [Required]
@@ -137,7 +144,7 @@ namespace Microsoft.DotNet.SignTool
 
             var signToolArgs = new SignToolArgs(TempDir, MicroBuildCorePath, TestSign, MSBuildPath, LogDir, enclosingDir);
             var signTool = DryRun ? new ValidationOnlySignTool(signToolArgs) : (SignTool)new RealSignTool(signToolArgs);
-            var signingInput = new Configuration(TempDir, ItemsToSign, defaultSignInfoForPublicKeyToken, explicitCertificates, fileExtensionSignInfo, dualCertificates, Log).GenerateListOfFiles();
+            var signingInput = new Configuration(StrictSigningInfo, TempDir, ItemsToSign, defaultSignInfoForPublicKeyToken, explicitCertificates, fileExtensionSignInfo, dualCertificates, Log).GenerateListOfFiles();
 
             if (Log.HasLoggedErrors) return;
 

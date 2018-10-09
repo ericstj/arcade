@@ -24,6 +24,12 @@ namespace Microsoft.DotNet.SignTool
         private readonly string[] _explicitSignList;
 
         /// <summary>
+        /// If set to true all discovered file names will need to have a mapping
+        /// on the FileSignInfo itemgroup. Otherwise, the task will error.
+        /// </summary>
+        private readonly bool _strictSigningInfo;
+
+        /// <summary>
         /// This store content information for container files.
         /// Key is the content hash of the file.
         /// </summary>
@@ -71,7 +77,7 @@ namespace Microsoft.DotNet.SignTool
         /// </summary>
         internal List<KeyValuePair<string, string>> _filesToCopy;
 
-        public Configuration(string tempDir, string[] explicitSignList, Dictionary<string, SignInfo> defaultSignInfoForPublicKeyToken, 
+        public Configuration(bool strictSigningInfo, string tempDir, string[] explicitSignList, Dictionary<string, SignInfo> defaultSignInfoForPublicKeyToken, 
             Dictionary<ExplicitCertificateKey, string> explicitCertificates, Dictionary<string, SignInfo> extensionSignInfo, 
             string[] dualCertificates, TaskLoggingHelper log)
         {
@@ -80,6 +86,7 @@ namespace Microsoft.DotNet.SignTool
             Debug.Assert(defaultSignInfoForPublicKeyToken != null);
             Debug.Assert(explicitCertificates != null);
 
+            _strictSigningInfo = strictSigningInfo;
             _pathToContainerUnpackingDirectory = Path.Combine(tempDir, "ContainerSigning");
             _log = log;
             _defaultSignInfoForPublicKeyToken = defaultSignInfoForPublicKeyToken;
@@ -147,6 +154,7 @@ namespace Microsoft.DotNet.SignTool
             var hasSignInfo = _fileExtensionSignInfo.TryGetValue(Path.GetExtension(fullPath), out var signInfo);
 
             var isAlreadySigned = false;
+            var publicKeyToken = string.Empty;
 
             if (FileSignInfo.IsPEFile(fullPath))
             {
@@ -155,7 +163,7 @@ namespace Microsoft.DotNet.SignTool
                     isAlreadySigned = ContentUtil.IsAuthenticodeSigned(stream);
                 }
 
-                GetPEInfo(fullPath, out var isManaged, out var publicKeyToken, out targetFramework);
+                GetPEInfo(fullPath, out var isManaged, out publicKeyToken, out targetFramework);
 
                 // Get the default sign info based on the PKT, if applicable:
                 if (isManaged && _defaultSignInfoForPublicKeyToken.TryGetValue(publicKeyToken, out var pktBasedSignInfo))
