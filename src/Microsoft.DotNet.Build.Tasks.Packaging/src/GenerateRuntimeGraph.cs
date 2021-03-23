@@ -7,6 +7,7 @@ using NuGet.RuntimeModel;
 using NuGet.Versioning;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -49,6 +50,15 @@ namespace Microsoft.DotNet.Build.Tasks.Packaging
         ///     that should be omitted from the RuntimeGraph.  These RIDs will be defined but not referenced by this RuntimeGroup.
         /// </summary>
         public ITaskItem[] RuntimeGroups
+        {
+            get;
+            set;
+        }
+
+        /// <summary>
+        /// Additional runtime identifiers to add to the graph.
+        /// </summary>
+        public string[] InferRuntimeIdentifiers
         {
             get;
             set;
@@ -135,7 +145,11 @@ namespace Microsoft.DotNet.Build.Tasks.Packaging
                 runtimeGraph = new RuntimeGraph();
             }
 
-            foreach (var runtimeGroup in RuntimeGroups.NullAsEmpty().Select(i => new RuntimeGroup(i)))
+            List<RuntimeGroup> runtimeGroups = RuntimeGroups.NullAsEmpty().Select(i => new RuntimeGroup(i)).ToList();
+
+            AddInferredRuntimeIdentifiers(runtimeGroups, InferRuntimeIdentifiers.NullAsEmpty());
+
+            foreach (var runtimeGroup in runtimeGroups)
             {
                 runtimeGraph = SafeMerge(runtimeGraph, runtimeGroup);
             }
@@ -273,307 +287,77 @@ namespace Microsoft.DotNet.Build.Tasks.Packaging
             }
         }
 
-        class RuntimeGroup
+        private void AddInferredRuntimeIdentifiers(ICollection<RuntimeGroup> runtimeGroups, IEnumerable<string> runtimeIdentifiers)
         {
-            private const string rootRID = "any";
-            private const char VersionDelimiter = '.';
-            private const char ArchitectureDelimiter = '-';
-            private const char QualifierDelimiter = '-';
+            var runtimeGroupsByBaseRID = runtimeGroups.GroupBy(rg => rg.BaseRID).ToDictionary(g => g.Key, g => new List<RuntimeGroup>(g.AsEnumerable()));
 
-            public RuntimeGroup(ITaskItem item)
+            foreach(var runtimeIdentifer in runtimeIdentifiers)
             {
-                BaseRID = item.ItemSpec;
-                Parent = item.GetString(nameof(Parent));
-                Versions = item.GetStrings(nameof(Versions));
-                TreatVersionsAsCompatible = item.GetBoolean(nameof(TreatVersionsAsCompatible), true);
-                OmitVersionDelimiter = item.GetBoolean(nameof(OmitVersionDelimiter));
-                ApplyVersionsToParent = item.GetBoolean(nameof(ApplyVersionsToParent));
-                Architectures = item.GetStrings(nameof(Architectures));
-                AdditionalQualifiers = item.GetStrings(nameof(AdditionalQualifiers));
-                OmitRIDs = new HashSet<string>(item.GetStrings(nameof(OmitRIDs)));
-                OmitRIDDefinitions = new HashSet<string>(item.GetStrings(nameof(OmitRIDDefinitions)));
-                OmitRIDReferences = new HashSet<string>(item.GetStrings(nameof(OmitRIDReferences)));
-            }
+                RID rid = RID.Parse(runtimeIdentifer);
 
-            public string BaseRID { get; }
-            public string Parent { get; }
-            public IEnumerable<string> Versions { get; }
-            public bool TreatVersionsAsCompatible { get; }
-            public bool OmitVersionDelimiter { get; }
-            public bool ApplyVersionsToParent { get; }
-            public IEnumerable<string> Architectures { get; }
-            public IEnumerable<string> AdditionalQualifiers { get; }
-            public ICollection<string> OmitRIDs { get; }
-            public ICollection<string> OmitRIDDefinitions { get; }
-            public ICollection<string> OmitRIDReferences { get; }
-
-            private class RIDMapping
-            {
-                public RIDMapping(RID runtimeIdentifier)
+                if (!rid.HasArchitecture() && !rid.HasVersion())
                 {
-                    RuntimeIdentifier = runtimeIdentifier;
-                    Imports = Enumerable.Empty<RID>();
+                    Log.LogError($"Cannot add Runtime {rid} to any existing group since it has no architcture nor version.");
+                    continue;
                 }
 
-                public RIDMapping(RID runtimeIdentifier, IEnumerable<RID> imports)
+                if (runtimeGroupsByBaseRID.TryGetValue(rid.BaseRID, out var candidateRuntimeGroups))
                 {
-                    RuntimeIdentifier = runtimeIdentifier;
-                    Imports = imports;
-                }
+                    RuntimeGroup closestGroup = null;
+                    RuntimeVersion closestVersion = null;
 
-                public RID RuntimeIdentifier { get; }
-
-                public IEnumerable<RID> Imports { get; }
-            }
-
-            private class RID
-            {
-                public string BaseRID { get; set; }
-                public string VersionDelimiter { get; set; }
-                public string Version { get; set; }
-                public string ArchitectureDelimiter { get; set; }
-                public string Architecture { get; set; }
-                public string QualifierDelimiter { get; set; }
-                public string Qualifier { get; set; }
-
-                public override string ToString()
-                {
-                    StringBuilder builder = new StringBuilder(BaseRID);
-
-                    if (HasVersion())
+                    foreach(var candidate in candidateRuntimeGroups)
                     {
-                        builder.Append(VersionDelimiter);
-                        builder.Append(Version);
-                    }
-
-                    if (HasArchitecture())
-                    {
-                        builder.Append(ArchitectureDelimiter);
-                        builder.Append(Architecture);
-                    }
-
-                    if (HasQualifier())
-                    {
-                        builder.Append(QualifierDelimiter);
-                        builder.Append(Qualifier);
-                    }
-
-                    return builder.ToString();
-                }
-
-                public bool HasVersion()
-                {
-                    return Version != null;
-                }
-
-                public bool HasArchitecture()
-                {
-                    return Architecture != null;
-                }
-
-                public bool HasQualifier()
-                {
-                    return Qualifier != null;
-                }
-            }
-
-            private RID CreateRuntime(string baseRid, string version = null, string architecture = null, string qualifier = null)
-            {
-                return new RID()
-                {
-                    BaseRID = baseRid,
-                    VersionDelimiter = OmitVersionDelimiter ? String.Empty : VersionDelimiter.ToString(),
-                    Version = version,
-                    ArchitectureDelimiter = ArchitectureDelimiter.ToString(),
-                    Architecture = architecture,
-                    QualifierDelimiter = QualifierDelimiter.ToString(),
-                    Qualifier = qualifier
-                };
-            }
-
-            private IEnumerable<RIDMapping> GetRIDMappings()
-            {
-                // base =>
-                //      Parent
-                yield return Parent == null ?
-                    new RIDMapping(CreateRuntime(BaseRID)) :
-                    new RIDMapping(CreateRuntime(BaseRID), new[] { CreateRuntime(Parent) });
-
-                foreach (var architecture in Architectures)
-                {
-                    // base + arch =>
-                    //      base,
-                    //      parent + arch
-                    var imports = new List<RID>()
-                    {
-                        CreateRuntime(BaseRID)
-                    };
-
-                    if (!IsNullOrRoot(Parent))
-                    {
-                        imports.Add(CreateRuntime(Parent, architecture: architecture));
-                    }
-
-                    yield return new RIDMapping(CreateRuntime(BaseRID, architecture: architecture), imports);
-                }
-
-                string lastVersion = null;
-                foreach (var version in Versions)
-                {
-                    // base + version =>
-                    //      base + lastVersion,
-                    //      parent + version (optionally)
-                    var imports = new List<RID>()
-                    {
-                        CreateRuntime(BaseRID, version: lastVersion)
-                    };
-
-                    if (ApplyVersionsToParent)
-                    {
-                        imports.Add(CreateRuntime(Parent, version: version));
-                    }
-
-                    yield return new RIDMapping(CreateRuntime(BaseRID, version: version), imports);
-
-                    foreach (var architecture in Architectures)
-                    {
-                        // base + version + architecture =>
-                        //      base + version,
-                        //      base + lastVersion + architecture,
-                        //      parent + version + architecture (optionally)
-                        var archImports = new List<RID>()
+                        if (rid.HasArchitecture() && !candidate.Architectures.Contains(rid.Architecture))
                         {
-                            CreateRuntime(BaseRID, version: version),
-                            CreateRuntime(BaseRID, version: lastVersion, architecture: architecture)
-                        };
-
-                        if (ApplyVersionsToParent)
-                        {
-                            archImports.Add(CreateRuntime(Parent, version: version, architecture: architecture));
+                            continue;
                         }
 
-                        yield return new RIDMapping(CreateRuntime(BaseRID, version: version, architecture: architecture), archImports);
-                    }
-
-                    if (TreatVersionsAsCompatible)
-                    {
-                        lastVersion = version;
-                    }
-                }
-
-                foreach (var qualifier in AdditionalQualifiers)
-                {
-                    // base + qual =>
-                    //      base,
-                    //      parent + qual
-                    yield return new RIDMapping(CreateRuntime(BaseRID, qualifier: qualifier),
-                        new[]
+                        foreach(var version in candidate.Versions)
                         {
-                            CreateRuntime(BaseRID),
-                            IsNullOrRoot(Parent) ? CreateRuntime(qualifier) : CreateRuntime(Parent, qualifier:qualifier)
-                        });
-
-                    foreach (var architecture in Architectures)
-                    {
-                        // base + arch + qualifier =>
-                        //      base + qualifier,
-                        //      base + arch
-                        //      parent + arch + qualifier
-                        var imports = new List<RID>()
-                        {
-                            CreateRuntime(BaseRID, qualifier: qualifier),
-                            CreateRuntime(BaseRID, architecture: architecture)
-                        };
-
-                        if (!IsNullOrRoot(Parent))
-                        {
-                            imports.Add(CreateRuntime(Parent, architecture: architecture, qualifier: qualifier));
-                        }
-
-                        yield return new RIDMapping(CreateRuntime(BaseRID, architecture: architecture, qualifier: qualifier), imports);
-                    }
-
-                    lastVersion = null;
-                    foreach (var version in Versions)
-                    {
-                        // base + version + qualifier =>
-                        //      base + version,
-                        //      base + lastVersion + qualifier
-                        //      parent + version + qualifier (optionally)
-                        var imports = new List<RID>()
-                        {
-                            CreateRuntime(BaseRID, version: version),
-                            CreateRuntime(BaseRID, version: lastVersion, qualifier: qualifier)
-                        };
-
-                        if (ApplyVersionsToParent)
-                        {
-                            imports.Add(CreateRuntime(Parent, version: version, qualifier: qualifier));
-                        }
-
-                        yield return new RIDMapping(CreateRuntime(BaseRID, version: version, qualifier: qualifier), imports);
-
-                        foreach (var architecture in Architectures)
-                        {
-                            // base + version + architecture + qualifier =>
-                            //      base + version + qualifier, 
-                            //      base + version + architecture, 
-                            //      base + version,
-                            //      base + lastVersion + architecture + qualifier,
-                            //      parent + version + architecture + qualifier (optionally)
-                            var archImports = new List<RID>()
+                            if (closestVersion == null || 
+                               ((version < rid.Version) &&
+                                (version > closestVersion)))
                             {
-                                CreateRuntime(BaseRID, version: version, qualifier: qualifier),
-                                CreateRuntime(BaseRID, version: version, architecture: architecture),
-                                CreateRuntime(BaseRID, version: version),
-                                CreateRuntime(BaseRID, version: lastVersion, architecture: architecture, qualifier: qualifier)
-                            };
-
-                            if (ApplyVersionsToParent)
-                            {
-                                imports.Add(CreateRuntime(Parent, version: version, architecture: architecture, qualifier: qualifier));
+                                closestVersion = version;
+                                closestGroup = candidate;
                             }
-
-                            yield return new RIDMapping(CreateRuntime(BaseRID, version: version, architecture: architecture, qualifier: qualifier), archImports);
-                        }
-
-                        if (TreatVersionsAsCompatible)
-                        {
-                            lastVersion = version;
                         }
                     }
-                }
-            }
 
-            private bool IsNullOrRoot(string rid)
-            {
-                return rid == null || rid == rootRID;
-            }
-
-
-            public IEnumerable<RuntimeDescription> GetRuntimeDescriptions()
-            {
-                foreach (var mapping in GetRIDMappings())
-                {
-                    var rid = mapping.RuntimeIdentifier.ToString();
-
-                    if (OmitRIDs.Contains(rid) || OmitRIDDefinitions.Contains(rid))
+                    if (closestGroup == null)
                     {
-                        continue;
+                        // couldn't find a close group, create a new one for just this arch/version
+                        RuntimeGroup templateGroup = candidateRuntimeGroups.First();
+                        RuntimeGroup runtimeGroup = RuntimeGroup.CreateFromTemplate(templateGroup);
+
+                        if (rid.HasArchitecture())
+                        {
+                            runtimeGroup.Architectures.Add(rid.Architecture);
+                        }
+
+                        if (rid.HasVersion())
+                        {
+                            runtimeGroup.Versions.Add(rid.Version);
+                        }
+
+                        // add to overall list
+                        runtimeGroups.Add(runtimeGroup);
+
+                        // add to our base-RID specific list from the dictionary so that further iterations see it.
+                        candidateRuntimeGroups.Add(runtimeGroup);
+
+                    }
+                    else
+                    {
+                        closestGroup.Versions.Add(rid.Version);
                     }
 
-                    var imports = mapping.Imports
-                           .Select(i => i.ToString())
-                           .Where(i => !OmitRIDs.Contains(i) && !OmitRIDReferences.Contains(i))
-                           .ToArray();
-
-                    yield return new RuntimeDescription(rid, imports);
                 }
-            }
-
-            public RuntimeGraph GetRuntimeGraph()
-            {
-                return new RuntimeGraph(GetRuntimeDescriptions());
+                else
+                {
+                    Log.LogError($"Cannot find a group to add Runtime {rid} ({rid.BaseRID}) from {string.Join(",", runtimeGroupsByBaseRID.Keys)}");
+                }
             }
         }
 
@@ -674,5 +458,604 @@ namespace Microsoft.DotNet.Build.Tasks.Packaging
                 doc.Save(file);
             }
         }
+    }
+
+    internal class RuntimeGroup
+    {
+        private const string rootRID = "any";
+
+        public RuntimeGroup(ITaskItem item)
+        {
+            BaseRID = item.ItemSpec;
+            Parent = item.GetString(nameof(Parent));
+            Versions = new HashSet<RuntimeVersion>(item.GetStrings(nameof(Versions)).Select(v => new RuntimeVersion(v)));
+            TreatVersionsAsCompatible = item.GetBoolean(nameof(TreatVersionsAsCompatible), true);
+            OmitVersionDelimiter = item.GetBoolean(nameof(OmitVersionDelimiter));
+            ApplyVersionsToParent = item.GetBoolean(nameof(ApplyVersionsToParent));
+            Architectures = new HashSet<string>(item.GetStrings(nameof(Architectures)));
+            AdditionalQualifiers = item.GetStrings(nameof(AdditionalQualifiers));
+            OmitRIDs = new HashSet<string>(item.GetStrings(nameof(OmitRIDs)));
+            OmitRIDDefinitions = new HashSet<string>(item.GetStrings(nameof(OmitRIDDefinitions)));
+            OmitRIDReferences = new HashSet<string>(item.GetStrings(nameof(OmitRIDReferences)));
+        }
+
+        private RuntimeGroup(RuntimeGroup template)
+        {
+            BaseRID = template.BaseRID;
+            Parent = template.Parent;
+            Versions = new HashSet<RuntimeVersion>();
+            TreatVersionsAsCompatible = template.TreatVersionsAsCompatible;
+            OmitVersionDelimiter = template.OmitVersionDelimiter;
+            ApplyVersionsToParent = template.ApplyVersionsToParent;
+            Architectures = new HashSet<string>();
+            AdditionalQualifiers = template.AdditionalQualifiers;
+            OmitRIDs = new HashSet<string>();
+            OmitRIDDefinitions = new HashSet<string>();
+            OmitRIDReferences = new HashSet<string>();
+        }
+
+        /// <summary>
+        /// Creates a new RuntimeGroup that matches existing template for parent and format with no architectures, versions or qualifiers.
+        /// </summary>
+        /// <param name="runtimeGroup"></param>
+        /// <returns></returns>
+        public static RuntimeGroup CreateFromTemplate(RuntimeGroup template)
+        {
+            return new RuntimeGroup(template);
+        }
+
+        public string BaseRID { get; }
+        public string Parent { get; }
+        public ICollection<RuntimeVersion> Versions { get; }
+        public bool TreatVersionsAsCompatible { get; }
+        public bool OmitVersionDelimiter { get; }
+        public bool ApplyVersionsToParent { get; }
+        public ICollection<string> Architectures { get; }
+        public IEnumerable<string> AdditionalQualifiers { get; }
+        public ICollection<string> OmitRIDs { get; }
+        public ICollection<string> OmitRIDDefinitions { get; }
+        public ICollection<string> OmitRIDReferences { get; }
+
+        private class RIDMapping
+        {
+            public RIDMapping(RID runtimeIdentifier)
+            {
+                RuntimeIdentifier = runtimeIdentifier;
+                Imports = Enumerable.Empty<RID>();
+            }
+
+            public RIDMapping(RID runtimeIdentifier, IEnumerable<RID> imports)
+            {
+                RuntimeIdentifier = runtimeIdentifier;
+                Imports = imports;
+            }
+
+            public RID RuntimeIdentifier { get; }
+
+            public IEnumerable<RID> Imports { get; }
+        }
+
+
+        private RID CreateRuntime(string baseRid, RuntimeVersion version = null, string architecture = null, string qualifier = null)
+        {
+            return new RID()
+            {
+                BaseRID = baseRid,
+                Version = version,
+                OmitVersionDelimiter = OmitVersionDelimiter,
+                Architecture = architecture,
+                Qualifier = qualifier
+            };
+        }
+
+        private IEnumerable<RIDMapping> GetRIDMappings()
+        {
+            // base =>
+            //      Parent
+            yield return Parent == null ?
+                new RIDMapping(CreateRuntime(BaseRID)) :
+                new RIDMapping(CreateRuntime(BaseRID), new[] { CreateRuntime(Parent) });
+
+            foreach (var architecture in Architectures)
+            {
+                // base + arch =>
+                //      base,
+                //      parent + arch
+                var imports = new List<RID>()
+                    {
+                        CreateRuntime(BaseRID)
+                    };
+
+                if (!IsNullOrRoot(Parent))
+                {
+                    imports.Add(CreateRuntime(Parent, architecture: architecture));
+                }
+
+                yield return new RIDMapping(CreateRuntime(BaseRID, architecture: architecture), imports);
+            }
+
+            RuntimeVersion lastVersion = null;
+            foreach (var version in Versions)
+            {
+                // base + version =>
+                //      base + lastVersion,
+                //      parent + version (optionally)
+                var imports = new List<RID>()
+                    {
+                        CreateRuntime(BaseRID, version: lastVersion)
+                    };
+
+                if (ApplyVersionsToParent)
+                {
+                    imports.Add(CreateRuntime(Parent, version: version));
+                }
+
+                yield return new RIDMapping(CreateRuntime(BaseRID, version: version), imports);
+
+                foreach (var architecture in Architectures)
+                {
+                    // base + version + architecture =>
+                    //      base + version,
+                    //      base + lastVersion + architecture,
+                    //      parent + version + architecture (optionally)
+                    var archImports = new List<RID>()
+                        {
+                            CreateRuntime(BaseRID, version: version),
+                            CreateRuntime(BaseRID, version: lastVersion, architecture: architecture)
+                        };
+
+                    if (ApplyVersionsToParent)
+                    {
+                        archImports.Add(CreateRuntime(Parent, version: version, architecture: architecture));
+                    }
+
+                    yield return new RIDMapping(CreateRuntime(BaseRID, version: version, architecture: architecture), archImports);
+                }
+
+                if (TreatVersionsAsCompatible)
+                {
+                    lastVersion = version;
+                }
+            }
+
+            foreach (var qualifier in AdditionalQualifiers)
+            {
+                // base + qual =>
+                //      base,
+                //      parent + qual
+                yield return new RIDMapping(CreateRuntime(BaseRID, qualifier: qualifier),
+                    new[]
+                    {
+                            CreateRuntime(BaseRID),
+                            IsNullOrRoot(Parent) ? CreateRuntime(qualifier) : CreateRuntime(Parent, qualifier:qualifier)
+                    });
+
+                foreach (var architecture in Architectures)
+                {
+                    // base + arch + qualifier =>
+                    //      base + qualifier,
+                    //      base + arch
+                    //      parent + arch + qualifier
+                    var imports = new List<RID>()
+                        {
+                            CreateRuntime(BaseRID, qualifier: qualifier),
+                            CreateRuntime(BaseRID, architecture: architecture)
+                        };
+
+                    if (!IsNullOrRoot(Parent))
+                    {
+                        imports.Add(CreateRuntime(Parent, architecture: architecture, qualifier: qualifier));
+                    }
+
+                    yield return new RIDMapping(CreateRuntime(BaseRID, architecture: architecture, qualifier: qualifier), imports);
+                }
+
+                lastVersion = null;
+                foreach (var version in Versions)
+                {
+                    // base + version + qualifier =>
+                    //      base + version,
+                    //      base + lastVersion + qualifier
+                    //      parent + version + qualifier (optionally)
+                    var imports = new List<RID>()
+                        {
+                            CreateRuntime(BaseRID, version: version),
+                            CreateRuntime(BaseRID, version: lastVersion, qualifier: qualifier)
+                        };
+
+                    if (ApplyVersionsToParent)
+                    {
+                        imports.Add(CreateRuntime(Parent, version: version, qualifier: qualifier));
+                    }
+
+                    yield return new RIDMapping(CreateRuntime(BaseRID, version: version, qualifier: qualifier), imports);
+
+                    foreach (var architecture in Architectures)
+                    {
+                        // base + version + architecture + qualifier =>
+                        //      base + version + qualifier, 
+                        //      base + version + architecture, 
+                        //      base + version,
+                        //      base + lastVersion + architecture + qualifier,
+                        //      parent + version + architecture + qualifier (optionally)
+                        var archImports = new List<RID>()
+                            {
+                                CreateRuntime(BaseRID, version: version, qualifier: qualifier),
+                                CreateRuntime(BaseRID, version: version, architecture: architecture),
+                                CreateRuntime(BaseRID, version: version),
+                                CreateRuntime(BaseRID, version: lastVersion, architecture: architecture, qualifier: qualifier)
+                            };
+
+                        if (ApplyVersionsToParent)
+                        {
+                            imports.Add(CreateRuntime(Parent, version: version, architecture: architecture, qualifier: qualifier));
+                        }
+
+                        yield return new RIDMapping(CreateRuntime(BaseRID, version: version, architecture: architecture, qualifier: qualifier), archImports);
+                    }
+
+                    if (TreatVersionsAsCompatible)
+                    {
+                        lastVersion = version;
+                    }
+                }
+            }
+        }
+
+        private bool IsNullOrRoot(string rid)
+        {
+            return rid == null || rid == rootRID;
+        }
+
+
+        public IEnumerable<RuntimeDescription> GetRuntimeDescriptions()
+        {
+            foreach (var mapping in GetRIDMappings())
+            {
+                var rid = mapping.RuntimeIdentifier.ToString();
+
+                if (OmitRIDs.Contains(rid) || OmitRIDDefinitions.Contains(rid))
+                {
+                    continue;
+                }
+
+                var imports = mapping.Imports
+                       .Select(i => i.ToString())
+                       .Where(i => !OmitRIDs.Contains(i) && !OmitRIDReferences.Contains(i))
+                       .ToArray();
+
+                yield return new RuntimeDescription(rid, imports);
+            }
+        }
+
+        public RuntimeGraph GetRuntimeGraph()
+        {
+            return new RuntimeGraph(GetRuntimeDescriptions());
+        }
+    }
+
+    internal class RID
+    {
+        internal const char VersionDelimiter = '.';
+        internal const char ArchitectureDelimiter = '-';
+        internal const char QualifierDelimiter = '-';
+
+        public string BaseRID { get; set; }
+        public bool OmitVersionDelimiter { get; set; }
+        public RuntimeVersion Version { get; set; }
+        public string Architecture { get; set; }
+        public string Qualifier { get; set; }
+
+        public override string ToString()
+        {
+            StringBuilder builder = new StringBuilder(BaseRID);
+
+            if (HasVersion())
+            {
+                if (!OmitVersionDelimiter)
+                {
+                    builder.Append(VersionDelimiter);
+                }
+                builder.Append(Version);
+            }
+
+            if (HasArchitecture())
+            {
+                builder.Append(ArchitectureDelimiter);
+                builder.Append(Architecture);
+            }
+
+            if (HasQualifier())
+            {
+                builder.Append(QualifierDelimiter);
+                builder.Append(Qualifier);
+            }
+
+            return builder.ToString();
+        }
+
+
+        enum RIDPart : int
+        {
+            Base = 0,
+            Version,
+            Architcture,
+            Qualifier,
+            Max = Qualifier
+        }
+
+        public static RID Parse(string runtimeIdentifier)
+        {
+            string[] parts = new string[(int)RIDPart.Max + 1];
+            bool omitVersionDelimiter = true;
+            RIDPart parseState = RIDPart.Base;
+
+            int partStart = 0, partLength = 0;
+
+            // qualifier is indistinguishable from arch so we cannot distinguish it for parsing purposes
+            Debug.Assert(ArchitectureDelimiter == QualifierDelimiter);
+
+            for (int i = 0; i < runtimeIdentifier.Length; i++)
+            {
+                char current = runtimeIdentifier[i];
+                partLength = i - partStart;
+
+                switch (parseState)
+                {
+                    case RIDPart.Base:
+                        // treat any number as the start of the version
+                        if (current == VersionDelimiter || (current >= '0' && current <= '9'))
+                        {
+                            SetPart();
+                            partStart = i;
+                            if (current == VersionDelimiter)
+                            {
+                                omitVersionDelimiter = false;
+                                partStart = i + 1;
+                            }
+                            parseState = RIDPart.Version;
+                        }
+                        // version might be omitted
+                        else if (current == ArchitectureDelimiter)
+                        {
+                            // ensure there's no version later in the string
+                            if (-1 != runtimeIdentifier.IndexOf(VersionDelimiter, i))
+                            {
+                                break;
+                            }
+                            SetPart();
+                            partStart = i + 1;  // skip delimiter
+                            parseState = RIDPart.Architcture;
+                        }
+                        break;
+                    case RIDPart.Version:
+                        if (current == ArchitectureDelimiter)
+                        {
+                            SetPart();
+                            partStart = i + 1;  // skip delimiter
+                            parseState = RIDPart.Architcture;
+                        }
+                        break;
+                    case RIDPart.Architcture:
+                        if (current == QualifierDelimiter)
+                        {
+                            SetPart();
+                            partStart = i + 1;  // skip delimiter
+                            parseState = RIDPart.Qualifier;
+                        }
+                        break;
+                    default:
+                        break;
+                }
+            }
+
+            partLength = runtimeIdentifier.Length - partStart;
+            if (partLength > 0)
+            {
+                SetPart();
+            }
+
+            string GetPart(RIDPart part)
+            {
+                return parts[(int)part];
+            }
+
+            void SetPart()
+            {
+                if (partLength == 0)
+                {
+                    throw new ArgumentException($"unexpected delimiter at position {partStart} in {runtimeIdentifier}");
+                }
+
+                parts[(int)parseState] = runtimeIdentifier.Substring(partStart, partLength);
+            }
+
+            string version = GetPart(RIDPart.Version);
+
+            if (version == null)
+            {
+                omitVersionDelimiter = false;
+            }
+
+            return new RID()
+            {
+                BaseRID = GetPart(RIDPart.Base),
+                OmitVersionDelimiter = omitVersionDelimiter,
+                Version = version == null ? null : new RuntimeVersion(version),
+                Architecture = GetPart(RIDPart.Architcture),
+                Qualifier = GetPart(RIDPart.Qualifier)
+            };
+        }
+
+
+        public bool HasVersion()
+        {
+            return Version != null;
+        }
+
+        public bool HasArchitecture()
+        {
+            return Architecture != null;
+        }
+
+        public bool HasQualifier()
+        {
+            return Qualifier != null;
+        }
+
+        public override bool Equals(object obj)
+        {
+            return Equals(obj as RID);
+        }
+
+        public bool Equals(RID obj)
+        {
+            return object.ReferenceEquals(obj, this) ||
+                (!(obj is null) &&
+                BaseRID == obj.BaseRID &&
+                OmitVersionDelimiter == obj.OmitVersionDelimiter &&
+                Version == obj.Version &&
+                Architecture == obj.Architecture &&
+                Qualifier == obj.Qualifier);
+
+        }
+
+        public override int GetHashCode()
+        {
+#if NETFRAMEWORK
+                return BaseRID.GetHashCode();
+#else
+            HashCode hashCode = new HashCode();
+            hashCode.Add(BaseRID);
+            hashCode.Add(VersionDelimiter);
+            hashCode.Add(Version);
+            hashCode.Add(ArchitectureDelimiter);
+            hashCode.Add(Architecture);
+            hashCode.Add(QualifierDelimiter);
+            hashCode.Add(Qualifier);
+            return hashCode.ToHashCode();
+#endif
+        }
+    }
+
+    /// <summary>
+    /// A Version class that also supports a single integer (major only)
+    /// </summary>
+    internal sealed class RuntimeVersion : IComparable, IComparable<RuntimeVersion>, IEquatable<RuntimeVersion>
+    {
+        private Version version;
+        private bool hasMinor;
+
+        public RuntimeVersion(string versionString)
+        {
+            // intentionally don't support the type of version that omits the separators as it is abiguous.
+            // for example Windows 8.1 was encoded as win81, where as Windows 10.0 was encoded as win10
+
+            if (versionString.IndexOf('.') == -1)
+            {
+                versionString += ".0";
+                hasMinor = false;
+            }
+            else
+            {
+                hasMinor = true;
+            }
+            version = Version.Parse(versionString);
+
+        }
+
+        public int CompareTo(object obj)
+        {
+            if (obj == null)
+            {
+                return 1;
+            }
+
+            if (obj is RuntimeVersion version)
+            {
+                return CompareTo(version);
+            }
+
+            throw new ArgumentException();
+        }
+
+        public int CompareTo(RuntimeVersion other)
+        {
+            int versionResult = version.CompareTo(other.version);
+
+            if (versionResult == 0)
+            {
+                if (!hasMinor && other.hasMinor)
+                {
+                    return -1;
+                }
+
+                if (hasMinor && !other.hasMinor)
+                {
+                    return 1;
+                }
+            }
+
+            return versionResult;
+        }
+
+        public bool Equals(RuntimeVersion other)
+        {
+            return object.ReferenceEquals(other, this) ||
+                (!(other is null) &&
+                (hasMinor == other.hasMinor) &&
+                version.Equals(other.version));
+        }
+
+        public override bool Equals(object obj)
+        {
+            return Equals(obj as RuntimeVersion);
+        }
+
+        public override int GetHashCode()
+        {
+            return version.GetHashCode() | (hasMinor ? 1 : 0);
+        }
+
+        public override string ToString()
+        {
+            return hasMinor ? version.ToString() : version.Major.ToString();
+        }
+
+        public static bool operator ==(RuntimeVersion v1, RuntimeVersion v2)
+        {
+            if (v2 is null)
+            {
+                return (v1 is null) ? true : false;
+            }
+
+            return ReferenceEquals(v2, v1) ? true : v2.Equals(v1);
+        }
+
+        public static bool operator !=(RuntimeVersion v1, RuntimeVersion v2) => !(v1 == v2);
+
+        public static bool operator <(RuntimeVersion v1, RuntimeVersion v2)
+        {
+            if (v1 is null)
+            {
+                return !(v2 is null);
+            }
+
+            return v1.CompareTo(v2) < 0;
+        }
+
+        public static bool operator <=(RuntimeVersion v1, RuntimeVersion v2)
+        {
+            if (v1 is null)
+            {
+                return true;
+            }
+
+            return v1.CompareTo(v2) <= 0;
+        }
+
+        public static bool operator >(RuntimeVersion v1, RuntimeVersion v2) => v2 < v1;
+
+        public static bool operator >=(RuntimeVersion v1, RuntimeVersion v2) => v2 <= v1;
     }
 }
