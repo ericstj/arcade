@@ -9,13 +9,32 @@
        https://docs.microsoft.com/en-us/windows/win32/winprog64/wow64-implementation-details  -->
   <?if $(var.Platform)~=x86?>
     <?define InstallerArchitecture="X86"?>
+    <?define Program_Files=ProgramFilesFolder?>
   <?elseif $(var.Platform)~=x64?>
     <?define InstallerArchitecture="AMD64"?>
+    <?define Program_Files=ProgramFiles64Folder ?>
   <?elseif $(var.Platform)~=arm64?>
     <?define InstallerArchitecture="ARM64"?>
+    <?define Program_Files=ProgramFiles64Folder?>
   <?else?>
     <?error Unknown platform, $(var.Platform) ?>?
   <?endif?>
+
+  <Fragment>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="$(var.Program_Files)">
+        <Directory Id="DOTNETHOME" Name="dotnet" />
+      </Directory>
+    </Directory>
+
+    <Property Id="DOTNETHOME">
+      <RegistrySearch Id="regSearch_DOTNETHOME_$(var.Platform)" Root="HKLM"  Key="SOFTWARE\dotnet\Setup\InstalledVersions\$(var.Platform)" Name="InstallLocation" Win64="no" Type="raw" />
+    </Property>
+
+    <?if $(var.Platform)~=x64?>
+    <CustomActionRef Id="Set_DOTNETHOME_NON_NATIVE_ARCHITECTURE" />
+    <?endif?>
+  </Fragment>
 
   <Fragment>
     <!-- Identify when installing in emulation as when PROCESSOR_ARCHITECTURE does not match the installer architecture
