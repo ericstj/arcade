@@ -22,11 +22,14 @@
          native machine (where supported).  Also detect running under WOW on x86 using VersionNT64, 
          since WIX_NATIVE_MACHINE cannot be retrieved on older Windows builds. -->
     <PropertyRef Id="WIX_NATIVE_MACHINE" />
-    <SetProperty Action="Set_NON_NATIVE_ARCHITECTURE" Id="NON_NATIVE_ARCHITECTURE" Value="true" Before="CostFinalize">
+    <SetProperty Action="Set_INSTALLING_NATIVE_ARCHITECTURE" Id="INSTALLING_NATIVE_ARCHITECTURE" Value="true" Before="CostFinalize">
      <?if $(var.Platform)~=x86?>
-      VersionNT64 OR
+      NOT VersionNT64 AND
      <?endif?>
-      WIX_NATIVE_MACHINE AND NOT WIX_NATIVE_MACHINE="$(var.InstallerNativeMachine)"
+     (NOT WIX_NATIVE_MACHINE OR WIX_NATIVE_MACHINE=$(var.InstallerNativeMachine)")
+    </SetProperty>
+    <SetProperty Action="Set_NON_NATIVE_ARCHITECTURE" Id="NON_NATIVE_ARCHITECTURE" Value="true" After="Set_INSTALLING_NATIVE_ARCHITECTURE">
+      NOT INSTALLING_NATIVE_ARCHITECTURE
     </SetProperty>
   </Fragment>
 
